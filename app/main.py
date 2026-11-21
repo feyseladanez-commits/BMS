@@ -1,24 +1,25 @@
 """Ethiopia Building and Rental Registry - backend (FastAPI + SQLAlchemy).
 SQLite by default; set DATABASE_URL=postgresql+psycopg://... for PostgreSQL."""
-import os, time, base64, hmac, struct, html, hashlib, secrets, threading, uuid, datetime as dt
+import os, time, base64, hmac, struct, html, hashlib, secrets, threading, uuid, mimetypes, datetime as dt
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 import jwt
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, Request, Depends, Header, HTTPException, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import (create_engine, String, Float, Numeric, Date, DateTime, ForeignKey, Text,
+from sqlalchemy import (create_engine, String, Float, Numeric, Date, DateTime, ForeignKey, Text, LargeBinary,
                         UniqueConstraint, select, func, text, inspect as sa_inspect)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
 from .policy import ADMIN_POWERS, LEGACY, plist, pjoin, clean_powers, in_scope, norm
 
 HERE = Path(__file__).parent
 DB = os.getenv("DATABASE_URL", "sqlite:///./registry.db")
+if DB.startswith(("postgres://", "postgresql://")): DB = "postgresql+psycopg://" + DB.split("://", 1)[1]  # hosts show the plain URL; the driver in requirements.txt is psycopg 3
 SECRET = os.getenv("SECRET_KEY") or secrets.token_hex(32)  # set SECRET_KEY in production
-UPLOADS = Path(os.getenv("UPLOAD_DIR", "./uploads")); UPLOADS.mkdir(exist_ok=True)
+UPLOADS = Path(os.getenv("UPLOAD_DIR", "./uploads")); UPLOADS.mkdir(parents=True, exist_ok=True)
 engine = create_engine(DB, connect_args={"check_same_thread": False} if DB.startswith("sqlite") else {})
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 LOCK = threading.Lock()  # serialises BRN issue and contract conflict check + insert
@@ -68,6 +69,10 @@ class BFile(Base):
     category: Mapped[str] = mapped_column(String(40)); filename: Mapped[str] = mapped_column(String(200))
     sha256: Mapped[str] = mapped_column(String(64)); size: Mapped[int]
     uploader: Mapped[int] = mapped_column(ForeignKey("users.id"))
+class BFileData(Base):  # the file bytes live in the database: on hosts with an ephemeral disk, files on disk vanish at every restart
+    __tablename__ = "building_file_data"
+    file_id: Mapped[int] = mapped_column(ForeignKey("building_files.id"), primary_key=True, autoincrement=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
 class Unit(Base):
     __tablename__ = "units"
     __table_args__ = (UniqueConstraint("building_id", "number"),)
@@ -292,14 +297,16 @@ async def upload(bid: int, category: str = Form("front"), file: UploadFile = Fil
     if ext not in (".jpg", ".jpeg", ".png", ".pdf"): raise HTTPException(400, "Only JPG, PNG or PDF files are allowed")
     data = await file.read()
     if len(data) > 8_000_000: raise HTTPException(400, "File is larger than 8 MB")
-    name = uuid.uuid4().hex + ext; (UPLOADS / name).write_bytes(data)
+    name = uuid.uuid4().hex + ext  # only the name and type are kept here; the bytes go to BFileData
     f = BFile(building_id=b.id, category=category, filename=name, sha256=hashlib.sha256(data).hexdigest(), size=len(data), uploader=u.id)
-    db.add(f); db.flush(); log(db, u, "file_uploaded", f"building:{b.id}", category); db.commit(); return row(f)
+    db.add(f); db.flush(); db.add(BFileData(file_id=f.id, data=data)); log(db, u, "file_uploaded", f"building:{b.id}", category); db.commit(); return row(f)
 @app.get(A + "/files/{fid}")
 def get_file(fid: int, u: User = Depends(me), db: Session = Depends(get_db)):
     f = db.get(BFile, fid)
     if not f: raise HTTPException(404, "Not found")
-    get_b(db, u, f.building_id); return FileResponse(UPLOADS / f.filename)
+    get_b(db, u, f.building_id); blob = db.get(BFileData, f.id)
+    if blob: return Response(blob.data, media_type=mimetypes.guess_type(f.filename)[0] or "application/octet-stream")
+    return FileResponse(UPLOADS / f.filename)  # a file that an older version saved on disk
 @app.post(A + "/buildings/{bid}/submit")
 def submit(bid: int, u: User = Depends(me), db: Session = Depends(get_db)):
     need(u, "owner"); b = get_b(db, u, bid, write=True)
