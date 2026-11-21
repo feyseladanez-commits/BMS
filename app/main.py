@@ -53,6 +53,9 @@ class Building(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     name: Mapped[str] = mapped_column(String(200)); region: Mapped[str] = mapped_column(String(100))
     city: Mapped[str] = mapped_column(String(100)); woreda: Mapped[str] = mapped_column(String(100))
+    owner_fayda_last4: Mapped[Optional[str]] = mapped_column(String(4), nullable=True)  # owner's Fayda number is kept masked, like tenants'
+    owner_tin: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    license_no: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)  # trade licence number
     subcity: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # sub-city (kifle ketema); older buildings have none
     kebele: Mapped[str] = mapped_column(String(100)); lat: Mapped[float] = mapped_column(Float)
     lng: Mapped[float] = mapped_column(Float); floors: Mapped[int]; btype: Mapped[str] = mapped_column(String(30))
@@ -204,7 +207,7 @@ def legacy_org(db, role, woreda=None):  # officers and tax staff from before v0.
     return o
 def ensure_columns():  # small upgrade step: add the columns v0.4 needs to tables that an older version created
     for t, col, typ in (("users", "org_id", "INTEGER"), ("buildings", "issuer", "VARCHAR(200)"), ("rental_contracts", "issuer", "VARCHAR(200)"),
-                        ("buildings", "subcity", "VARCHAR(100)"),
+                        ("buildings", "subcity", "VARCHAR(100)"), ("buildings", "owner_fayda_last4", "VARCHAR(4)"), ("buildings", "owner_tin", "VARCHAR(30)"), ("buildings", "license_no", "VARCHAR(60)"),
                         ("building_files", "unit_id", "INTEGER"), ("building_files", "contract_id", "INTEGER"), ("building_files", "doc_no", "VARCHAR(60)"),
                         ("building_files", "expires", "DATE"), ("building_files", "orig_name", "VARCHAR(200)"),
                         ("units", "floor_id", "INTEGER"), ("units", "shop_name", "VARCHAR(200)"), ("units", "notes", "TEXT"),
@@ -220,6 +223,15 @@ def migrate_legacy():  # accounts with the old roles "officer" and "tax" become 
             o = legacy_org(db, u.role, u.woreda); log(db, None, "account_moved_to_organization", f"user:{u.id}", f"{u.role} -> org:{o.id}")
             u.role, u.org_id = "staff", o.id
         db.commit()
+BCATS = {"front": "Building photo (front)", "side": "Building photo (side)", "entrance": "Building photo (entrance)", "ownership": "Ownership document",
+         "owner_fayda": "Owner's Fayda ID", "owner_photo": "Owner's photo", "title_deed": "Title deed certificate", "lease_agreement": "Lease agreement",
+         "tin_certificate": "TIN certificate", "trade_license": "Trade licence"}
+PERSONAL = ("owner_fayda", "owner_photo")  # the owner's identity: only the owner and offices that review applications or hold tenant.docs may open these
+def missing_docs(db, b):  # what an application still lacks before it can be submitted
+    have = {x for x in db.scalars(select(BFile.category).where(BFile.building_id == b.id, BFile.unit_id.is_(None), BFile.contract_id.is_(None)))}
+    out = [BCATS[c] for c in ("front", "owner_fayda", "owner_photo") if c not in have]
+    if not have & {"title_deed", "lease_agreement"}: out.append("Title deed certificate or lease agreement")
+    return out
 def link_floors():  # units from before v0.5 only have a floor text: give each one a floor record (runs on every start, does nothing once done)
     with SessionLocal() as db:
         for un in db.scalars(select(Unit).where(Unit.floor_id.is_(None))).all():
@@ -257,7 +269,9 @@ class Reg(BaseModel): email: str; name: str; password: str = Field(min_length=8)
 class Login(BaseModel): email: str; password: str; code: Optional[str] = None
 class NewB(BaseModel):
     name: str; subcity: str = Field(min_length=1, max_length=100); woreda: str; kebele: str; lat: float = Field(ge=3, le=15); lng: float = Field(ge=33, le=48)
-    floors: int = Field(ge=1); region: str = "Addis Ababa"; city: str = "Addis Ababa"; btype: str = "commercial"
+    floors: int = Field(ge=1)
+    owner_fayda: Optional[str] = None; owner_tin: Optional[str] = Field(None, max_length=30); license_no: Optional[str] = Field(None, max_length=60)
+    region: str = "Addis Ababa"; city: str = "Addis Ababa"; btype: str = "commercial"
 class NewU(BaseModel):
     floor_id: Optional[int] = None; floor: Optional[str] = None  # give the floor record, or just its label
     number: str = Field(min_length=1, max_length=30); m2: Decimal = Field(gt=0, le=100000); use: str = "shop"
@@ -330,7 +344,10 @@ def new_b(d: NewB, u: User = Depends(me), db: Session = Depends(get_db)):
     if not d.subcity: raise HTTPException(400, "Enter the sub-city")
     if db.scalars(select(Building).where(func.lower(Building.name) == d.name.lower(), Building.kebele == d.kebele, Building.woreda == d.woreda)).first():
         raise HTTPException(409, "Possible duplicate: a building with this name already exists in this kebele")
-    b = Building(owner_id=u.id, tok=secrets.token_hex(12), **d.model_dump()); db.add(b); db.flush()
+    f = (d.owner_fayda or "").replace(" ", "")
+    if f and not (f.isdigit() and 6 <= len(f) <= 20): raise HTTPException(400, "Fayda number must be digits only")
+    data = d.model_dump(exclude={"owner_fayda"}); data.update(owner_fayda_last4=f[-4:] or None, owner_tin=(d.owner_tin or "").strip() or None, license_no=(d.license_no or "").strip() or None)
+    b = Building(owner_id=u.id, tok=secrets.token_hex(12), **data); db.add(b); db.flush()
     log(db, u, "building_created", f"building:{b.id}"); db.commit(); return row(b)
 @app.get(A + "/buildings")
 def list_b(u: User = Depends(me), db: Session = Depends(get_db)):
@@ -346,12 +363,12 @@ def list_b(u: User = Depends(me), db: Session = Depends(get_db)):
         fs = db.scalars(select(BFile).where(BFile.building_id == b.id, BFile.unit_id.is_(None), BFile.contract_id.is_(None))).all()  # shop photos and tenant documents are listed with their shop and tenant
         nf = db.scalar(select(func.count()).select_from(Floor).where(Floor.building_id == b.id))
         tot = db.scalar(select(func.coalesce(func.sum(Unit.m2), 0)).where(Unit.building_id == b.id))
-        out.append({**row(b), "files": [row(f) for f in fs], "floors_entered": nf, "total_m2": tot, "tok": b.tok if b.status == "approved" else None})
+        out.append({**row(b), "files": [row(f) for f in fs], "missing_docs": missing_docs(db, b), "floors_entered": nf, "total_m2": tot, "tok": b.tok if b.status == "approved" else None})
     return out
 @app.post(A + "/buildings/{bid}/files")
 async def upload(bid: int, category: str = Form("front"), file: UploadFile = File(...), u: User = Depends(me), db: Session = Depends(get_db)):
     b = get_b(db, u, bid, write=True); need(u, "owner")
-    if category not in ("front", "side", "entrance", "ownership"): raise HTTPException(400, "Unknown file category")
+    if category not in BCATS: raise HTTPException(400, "Unknown file category")
     ext = Path(file.filename or "").suffix.lower()
     if ext not in (".jpg", ".jpeg", ".png", ".pdf"): raise HTTPException(400, "Only JPG, PNG or PDF files are allowed")
     data = await file.read()
@@ -364,6 +381,9 @@ def get_file(fid: int, u: User = Depends(me), db: Session = Depends(get_db)):
     f = db.get(BFile, fid)
     if not f: raise HTTPException(404, "Not found")
     get_b(db, u, f.building_id)
+    if f.category in PERSONAL and u.role != "owner":
+        if not ({"building.review", "tenant.docs"} & my_powers(db, u)): raise HTTPException(404, "Not found")
+        log(db, u, "owner_document_viewed", f"building:{f.building_id}", f"file:{f.id} {f.category}"); db.commit()
     if f.contract_id:  # tenant documents (ID copies, licences, leases): the building's owner and offices that hold tenant.docs; every look by an office is logged
         if u.role != "owner" and "tenant.docs" not in my_powers(db, u): raise HTTPException(404, "Not found")
         if u.role != "owner": log(db, u, "tenant_document_viewed", f"contract:{f.contract_id}", f"file:{f.id} {f.category}"); db.commit()
@@ -374,8 +394,8 @@ def get_file(fid: int, u: User = Depends(me), db: Session = Depends(get_db)):
 def submit(bid: int, u: User = Depends(me), db: Session = Depends(get_db)):
     need(u, "owner"); b = get_b(db, u, bid, write=True)
     if b.status not in ("draft", "correction_requested"): raise HTTPException(400, "Already submitted")
-    if not db.scalars(select(BFile).where(BFile.building_id == b.id, BFile.category == "front")).first():
-        raise HTTPException(400, "Upload a front photo of the building first")
+    miss = missing_docs(db, b)
+    if miss: raise HTTPException(400, "Upload these documents first: " + ", ".join(miss))
     nf = db.scalar(select(func.count()).select_from(Floor).where(Floor.building_id == b.id))
     if nf < b.floors: raise HTTPException(400, f"Describe every floor first: {nf} of {b.floors} floors entered")
     b.status = "submitted"; ids = holders(db, "building.review", b)
