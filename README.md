@@ -1,4 +1,4 @@
-# Ethiopia Building and Rental Registry (v0.4)
+# Ethiopia Building and Rental Registry (v0.5)
 Run: `pip install -r requirements.txt && cp .env.example .env && set -a && . ./.env && uvicorn app.main:app --port 8000`
 Open http://localhost:8000. Sign up creates an owner. The admin from ADMIN_EMAIL creates organizations (woreda office, tax authority, ...) with their accounts and powers. API docs: /docs.
 Flow: owner registers building, uploads a front photo, submits; officer approves (one BRN); owner adds units (m²) and contracts; overlapping contracts are blocked (lock plus a PostgreSQL exclusion constraint when DATABASE_URL is PostgreSQL); QR letters open /verify/<token>.
@@ -51,3 +51,18 @@ Still open, needs a decision: a chain of approvals (for example kebele endorses,
 Photos and documents are now stored in the database (table `building_file_data`), so nothing important lives on the app's disk and hosts with an ephemeral filesystem no longer lose uploads. Files that an older version saved on disk are still served while they exist. The 8 MB per-file limit is unchanged; uploads count against the database's storage.
 The app listens on `$PORT` when the host sets one (default 8000). `DATABASE_URL` may be the plain `postgresql://` URL that hosts show; the app switches it to the psycopg 3 driver.
 Set `SECRET_KEY`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` and `DATABASE_URL` as environment variables. Without a PostgreSQL `DATABASE_URL` the data sits in a SQLite file on the app's disk and is lost on every restart on ephemeral hosts.
+
+## v0.5: building structure, shop photos, tenant documents
+- **Sub-city** is now required when an owner registers a building (suggestions list the sub-cities of Addis Ababa; any text is accepted). It shows on the building card, the registration letter and the CSV export. Older buildings keep an empty sub-city.
+- **Floors.** After saving the draft the owner adds each floor (label such as G, 1, 2; optional name; optional floor area in m²). The number of floors entered cannot exceed the floors declared, and **submitting for approval needs every floor entered**. When a floor area is given, the shops on it may not add up to more.
+- **Shops under each floor** (shop number, name, m², use). Shops can be added while the building is a draft, being corrected, or approved (not while under review or rejected). Old units are attached to a floor automatically on first start.
+- **Shop photos**: JPG or PNG, up to 10 per shop, 8 MB each. The owner can remove a wrong photo.
+- **Tenants**: the rental contract now also holds phone, TIN, trade licence number and business activity. Contracts can only be added once the building is approved.
+- **Tenant documents** per contract: ID/Fayda copy, trade licence, TIN certificate, lease agreement, authorization letter, other (JPG, PNG or PDF, up to 15 each, with optional document number and expiry date). The owner can remove a document only while the contract is still waiting for approval; the audit trail keeps each file's fingerprint.
+- **Who can open tenant documents:** the building's owner and offices that hold the new power `tenant.docs`. No office has it by default: the administrator ticks it per organization (Powers). The administrator account itself cannot open them. Every time an office opens one, it is written to the audit trail. Other offices still see the floors, shops, photos and tenant details, and are told how many documents are on file.
+- New endpoints: `POST /buildings/{id}/floors`, `PATCH|DELETE /floors/{id}`, `GET /buildings/{id}/structure`, `POST /units/{id}/photos`, `POST /contracts/{id}/files`, `DELETE /files/{id}`. `POST /buildings/{id}/units` takes `floor_id` (or the floor label) plus `shop_name` and `notes`.
+- **Upgrading from v0.4:** nothing to do by hand; the new columns and the floor records are added on start. Existing buildings that are still drafts will be asked for their floors before they can be submitted.
+- Amharic: the new labels are a machine draft like the rest; messages from the server stay in English.
+
+## v0.5.1: rent payments with receipts
+For every approved contract the building owner records each rent payment: month, amount paid, payment date, method (Telebirr, CBE Birr, bank transfer, cash, other), receipt or transaction number, and the **receipt file (required**, JPG, PNG or PDF). `POST /contracts/{id}/payments`, `DELETE /payments/{id}` (owner, within 48 hours; the audit trail keeps it). The structure screen shows the payments and the total paid per tenant. Receipts follow the same rule as tenant documents: owner and offices with `tenant.docs` only; other offices see the amounts and dates.
