@@ -46,3 +46,8 @@ API: `GET /org-meta`, `GET|POST /admin/orgs`, `PATCH /admin/orgs/{id}`, `POST /a
 Also fixed: the "Set up MFA" button called a function that did not exist (it now shows the key and an authenticator link, and still appears when a screen cannot load because MFA is required); accounts can change their own password; `/me` and login no longer return the encrypted MFA secret; photo categories are limited to front, side, entrance and ownership (the text was free and shown to officers); duplicate email in `POST /admin/users` answers 409 instead of 500.
 
 Still open, needs a decision: a chain of approvals (for example kebele endorses, then woreda approves; today one office decides each step), different powers for different people inside one organization (all accounts of an organization share its powers), tenant accounts, password reset and invitations by email, an audit trail limited to each office's own records. The new Amharic text is a machine draft like the rest.
+
+## v0.4.1: deployment notes
+Photos and documents are now stored in the database (table `building_file_data`), so nothing important lives on the app's disk and hosts with an ephemeral filesystem no longer lose uploads. Files that an older version saved on disk are still served while they exist. The 8 MB per-file limit is unchanged; uploads count against the database's storage.
+The app listens on `$PORT` when the host sets one (default 8000). `DATABASE_URL` may be the plain `postgresql://` URL that hosts show; the app switches it to the psycopg 3 driver.
+Set `SECRET_KEY`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` and `DATABASE_URL` as environment variables. Without a PostgreSQL `DATABASE_URL` the data sits in a SQLite file on the app's disk and is lost on every restart on ephemeral hosts.
