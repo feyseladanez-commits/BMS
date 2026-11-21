@@ -12,6 +12,7 @@ POWERS = {  # key -> plain-language description (the web page translates these l
     "dispute.freeze": "Freeze a contract by opening a dispute",
     "dispute.resolve": "Resolve disputes",
     "inspection.record": "Record inspections",
+    "tenant.docs": "View the documents tenants uploaded (ID, licence, lease)",
     "verify.etrade": "Record eTrade verifications",
     "verify.dars": "Record DARS verifications",
     "verify.fayda": "Record Fayda verifications",

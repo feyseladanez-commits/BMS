@@ -53,6 +53,7 @@ class Building(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     name: Mapped[str] = mapped_column(String(200)); region: Mapped[str] = mapped_column(String(100))
     city: Mapped[str] = mapped_column(String(100)); woreda: Mapped[str] = mapped_column(String(100))
+    subcity: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # sub-city (kifle ketema); older buildings have none
     kebele: Mapped[str] = mapped_column(String(100)); lat: Mapped[float] = mapped_column(Float)
     lng: Mapped[float] = mapped_column(Float); floors: Mapped[int]; btype: Mapped[str] = mapped_column(String(30))
     status: Mapped[str] = mapped_column(String(30), default="draft")
@@ -69,10 +70,24 @@ class BFile(Base):
     category: Mapped[str] = mapped_column(String(40)); filename: Mapped[str] = mapped_column(String(200))
     sha256: Mapped[str] = mapped_column(String(64)); size: Mapped[int]
     uploader: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    unit_id: Mapped[Optional[int]] = mapped_column(ForeignKey("units.id"), nullable=True)  # set: a photo of that shop
+    contract_id: Mapped[Optional[int]] = mapped_column(ForeignKey("rental_contracts.id"), nullable=True)  # set: a tenant document
+    doc_no: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)  # number printed on the document (licence no., ID no.)
+    expires: Mapped[Optional[dt.date]] = mapped_column(Date, nullable=True)
+    orig_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 class BFileData(Base):  # the file bytes live in the database: on hosts with an ephemeral disk, files on disk vanish at every restart
     __tablename__ = "building_file_data"
     file_id: Mapped[int] = mapped_column(ForeignKey("building_files.id"), primary_key=True, autoincrement=False)
     data: Mapped[bytes] = mapped_column(LargeBinary)
+class Floor(Base):  # one floor of a building; shops (units) sit under a floor
+    __tablename__ = "floors"
+    __table_args__ = (UniqueConstraint("building_id", "label"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    building_id: Mapped[int] = mapped_column(ForeignKey("buildings.id"))
+    label: Mapped[str] = mapped_column(String(30))  # G, 1, 2, Basement ...
+    name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    m2: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)  # total floor area; when set, the shops on it may not add up to more
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 class Unit(Base):
     __tablename__ = "units"
     __table_args__ = (UniqueConstraint("building_id", "number"),)
@@ -80,6 +95,9 @@ class Unit(Base):
     building_id: Mapped[int] = mapped_column(ForeignKey("buildings.id"))
     floor: Mapped[str] = mapped_column(String(30)); number: Mapped[str] = mapped_column(String(30))
     m2: Mapped[Decimal] = mapped_column(Numeric(12, 2)); use: Mapped[str] = mapped_column(String(50))
+    floor_id: Mapped[Optional[int]] = mapped_column(ForeignKey("floors.id"), nullable=True)
+    shop_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 class Measure(Base):
     __tablename__ = "unit_measurements"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -99,6 +117,10 @@ class Contract(Base):
     status: Mapped[str] = mapped_column(String(20), default="submitted")
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id")); tok: Mapped[str] = mapped_column(String(40), unique=True)
     issuer: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)  # name of the organization that approved it
+    tenant_phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    tenant_tin: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    trade_license_no: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    business_activity: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 class Audit(Base):  # append-only: the API has no update or delete for this table
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -181,7 +203,13 @@ def legacy_org(db, role, woreda=None):  # officers and tax staff from before v0.
         o = Organization(name=name, kind=kind, woreda=wd, powers=pjoin(clean_powers(LEGACY[role]))); db.add(o); db.flush()
     return o
 def ensure_columns():  # small upgrade step: add the columns v0.4 needs to tables that an older version created
-    for t, col, typ in (("users", "org_id", "INTEGER"), ("buildings", "issuer", "VARCHAR(200)"), ("rental_contracts", "issuer", "VARCHAR(200)")):
+    for t, col, typ in (("users", "org_id", "INTEGER"), ("buildings", "issuer", "VARCHAR(200)"), ("rental_contracts", "issuer", "VARCHAR(200)"),
+                        ("buildings", "subcity", "VARCHAR(100)"),
+                        ("building_files", "unit_id", "INTEGER"), ("building_files", "contract_id", "INTEGER"), ("building_files", "doc_no", "VARCHAR(60)"),
+                        ("building_files", "expires", "DATE"), ("building_files", "orig_name", "VARCHAR(200)"),
+                        ("units", "floor_id", "INTEGER"), ("units", "shop_name", "VARCHAR(200)"), ("units", "notes", "TEXT"),
+                        ("rental_contracts", "tenant_phone", "VARCHAR(30)"), ("rental_contracts", "tenant_tin", "VARCHAR(30)"),
+                        ("rental_contracts", "trade_license_no", "VARCHAR(60)"), ("rental_contracts", "business_activity", "VARCHAR(200)")):
         insp = sa_inspect(engine)
         if t in insp.get_table_names() and col not in {x["name"] for x in insp.get_columns(t)}:
             with engine.begin() as c: c.execute(text(f"ALTER TABLE {t} ADD COLUMN {col} {typ}"))
@@ -192,6 +220,30 @@ def migrate_legacy():  # accounts with the old roles "officer" and "tax" become 
             o = legacy_org(db, u.role, u.woreda); log(db, None, "account_moved_to_organization", f"user:{u.id}", f"{u.role} -> org:{o.id}")
             u.role, u.org_id = "staff", o.id
         db.commit()
+def link_floors():  # units from before v0.5 only have a floor text: give each one a floor record (runs on every start, does nothing once done)
+    with SessionLocal() as db:
+        for un in db.scalars(select(Unit).where(Unit.floor_id.is_(None))).all():
+            label = (un.floor or "").strip() or "?"
+            fl = db.scalars(select(Floor).where(Floor.building_id == un.building_id, Floor.label == label)).first()
+            if not fl: fl = Floor(building_id=un.building_id, label=label); db.add(fl); db.flush()
+            un.floor_id = fl.id
+        db.commit()
+def floor_for(db, b, floor_id, label, create=True):  # the floor a new shop goes on; a floor given only by its label is created on the way
+    if floor_id:
+        fl = db.get(Floor, floor_id)
+        if not fl or fl.building_id != b.id: raise HTTPException(404, "Floor not found")
+        return fl
+    label = (label or "").strip()
+    if not label: raise HTTPException(400, "Choose the floor this shop is on")
+    fl = db.scalars(select(Floor).where(Floor.building_id == b.id, Floor.label == label)).first()
+    if fl or not create: return fl
+    n = db.scalar(select(func.count()).select_from(Floor).where(Floor.building_id == b.id))
+    if n >= b.floors: raise HTTPException(400, f"This building has {b.floors} floor(s) and all are already described")
+    fl = Floor(building_id=b.id, label=label); db.add(fl); db.flush(); return fl
+def floor_room(db, fl, more, ignore_unit=None):  # the shops on a floor may not add up to more than the floor area (when the floor area is known)
+    if fl.m2 is None: return
+    used = Decimal(str(db.scalar(select(func.coalesce(func.sum(Unit.m2), 0)).where(Unit.floor_id == fl.id, Unit.id != (ignore_unit or 0)))))
+    if used + more > fl.m2: raise HTTPException(400, f"Shops on floor {fl.label} would total {used + more} m², more than the floor area of {fl.m2} m²")
 def clash(db, unit_id, s, e, ignore=None):
     q = select(Contract).where(Contract.unit_id == unit_id, Contract.status.in_(("submitted", "active", "terminated", "disputed")),
                                Contract.start_date <= e, Contract.end_date >= s)  # new_start<=old_end and old_start<=new_end
@@ -204,21 +256,26 @@ def cdict(db, c):
 class Reg(BaseModel): email: str; name: str; password: str = Field(min_length=8)
 class Login(BaseModel): email: str; password: str; code: Optional[str] = None
 class NewB(BaseModel):
-    name: str; woreda: str; kebele: str; lat: float = Field(ge=3, le=15); lng: float = Field(ge=33, le=48)
+    name: str; subcity: str = Field(min_length=1, max_length=100); woreda: str; kebele: str; lat: float = Field(ge=3, le=15); lng: float = Field(ge=33, le=48)
     floors: int = Field(ge=1); region: str = "Addis Ababa"; city: str = "Addis Ababa"; btype: str = "commercial"
-class NewU(BaseModel): floor: str; number: str; m2: Decimal = Field(gt=0, le=100000); use: str = "shop"
+class NewU(BaseModel):
+    floor_id: Optional[int] = None; floor: Optional[str] = None  # give the floor record, or just its label
+    number: str = Field(min_length=1, max_length=30); m2: Decimal = Field(gt=0, le=100000); use: str = "shop"
+    shop_name: Optional[str] = Field(None, max_length=200); notes: Optional[str] = Field(None, max_length=1000)
 class Area(BaseModel): m2: Decimal = Field(gt=0, le=100000)
 class NewC(BaseModel):
     unit_id: int; tenant_name: str; fayda: Optional[str] = None
+    tenant_phone: Optional[str] = Field(None, max_length=30); tenant_tin: Optional[str] = Field(None, max_length=30)
+    trade_license_no: Optional[str] = Field(None, max_length=60); business_activity: Optional[str] = Field(None, max_length=200)
     start_date: dt.date; end_date: dt.date; rent: Decimal = Field(gt=0)
 class Review(BaseModel): decision: str; reason: Optional[str] = None
 class NewUser(BaseModel): email: str; name: str; password: str = Field(min_length=8); role: str; woreda: Optional[str] = None
 class Term(BaseModel): effective: dt.date
 
-app = FastAPI(title="Ethiopia Building and Rental Registry", version="0.4")
+app = FastAPI(title="Ethiopia Building and Rental Registry", version="0.5")
 @app.on_event("startup")
 def startup():
-    Base.metadata.create_all(engine); ensure_columns(); migrate_legacy()
+    Base.metadata.create_all(engine); ensure_columns(); migrate_legacy(); link_floors()
     with SessionLocal() as db:  # first admin comes from environment, never hardcoded
         e, p = os.getenv("ADMIN_EMAIL"), os.getenv("ADMIN_PASSWORD")
         if e and p and not db.scalars(select(User).where(User.role == "admin")).first():
@@ -269,7 +326,8 @@ def audit(u: User = Depends(me), db: Session = Depends(get_db)):
 
 @app.post(A + "/buildings")
 def new_b(d: NewB, u: User = Depends(me), db: Session = Depends(get_db)):
-    need(u, "owner")
+    need(u, "owner"); d.subcity = d.subcity.strip()
+    if not d.subcity: raise HTTPException(400, "Enter the sub-city")
     if db.scalars(select(Building).where(func.lower(Building.name) == d.name.lower(), Building.kebele == d.kebele, Building.woreda == d.woreda)).first():
         raise HTTPException(409, "Possible duplicate: a building with this name already exists in this kebele")
     b = Building(owner_id=u.id, tok=secrets.token_hex(12), **d.model_dump()); db.add(b); db.flush()
@@ -285,9 +343,10 @@ def list_b(u: User = Depends(me), db: Session = Depends(get_db)):
     out = []
     for b in db.scalars(q):
         if not see(b): continue
-        fs = db.scalars(select(BFile).where(BFile.building_id == b.id)).all()
+        fs = db.scalars(select(BFile).where(BFile.building_id == b.id, BFile.unit_id.is_(None), BFile.contract_id.is_(None))).all()  # shop photos and tenant documents are listed with their shop and tenant
+        nf = db.scalar(select(func.count()).select_from(Floor).where(Floor.building_id == b.id))
         tot = db.scalar(select(func.coalesce(func.sum(Unit.m2), 0)).where(Unit.building_id == b.id))
-        out.append({**row(b), "files": [row(f) for f in fs], "total_m2": tot, "tok": b.tok if b.status == "approved" else None})
+        out.append({**row(b), "files": [row(f) for f in fs], "floors_entered": nf, "total_m2": tot, "tok": b.tok if b.status == "approved" else None})
     return out
 @app.post(A + "/buildings/{bid}/files")
 async def upload(bid: int, category: str = Form("front"), file: UploadFile = File(...), u: User = Depends(me), db: Session = Depends(get_db)):
@@ -298,13 +357,17 @@ async def upload(bid: int, category: str = Form("front"), file: UploadFile = Fil
     data = await file.read()
     if len(data) > 8_000_000: raise HTTPException(400, "File is larger than 8 MB")
     name = uuid.uuid4().hex + ext  # only the name and type are kept here; the bytes go to BFileData
-    f = BFile(building_id=b.id, category=category, filename=name, sha256=hashlib.sha256(data).hexdigest(), size=len(data), uploader=u.id)
+    f = BFile(building_id=b.id, category=category, filename=name, sha256=hashlib.sha256(data).hexdigest(), size=len(data), uploader=u.id, orig_name=(file.filename or "")[:200] or None)
     db.add(f); db.flush(); db.add(BFileData(file_id=f.id, data=data)); log(db, u, "file_uploaded", f"building:{b.id}", category); db.commit(); return row(f)
 @app.get(A + "/files/{fid}")
 def get_file(fid: int, u: User = Depends(me), db: Session = Depends(get_db)):
     f = db.get(BFile, fid)
     if not f: raise HTTPException(404, "Not found")
-    get_b(db, u, f.building_id); blob = db.get(BFileData, f.id)
+    get_b(db, u, f.building_id)
+    if f.contract_id:  # tenant documents (ID copies, licences, leases): the building's owner and offices that hold tenant.docs; every look by an office is logged
+        if u.role != "owner" and "tenant.docs" not in my_powers(db, u): raise HTTPException(404, "Not found")
+        if u.role != "owner": log(db, u, "tenant_document_viewed", f"contract:{f.contract_id}", f"file:{f.id} {f.category}"); db.commit()
+    blob = db.get(BFileData, f.id)
     if blob: return Response(blob.data, media_type=mimetypes.guess_type(f.filename)[0] or "application/octet-stream")
     return FileResponse(UPLOADS / f.filename)  # a file that an older version saved on disk
 @app.post(A + "/buildings/{bid}/submit")
@@ -313,6 +376,8 @@ def submit(bid: int, u: User = Depends(me), db: Session = Depends(get_db)):
     if b.status not in ("draft", "correction_requested"): raise HTTPException(400, "Already submitted")
     if not db.scalars(select(BFile).where(BFile.building_id == b.id, BFile.category == "front")).first():
         raise HTTPException(400, "Upload a front photo of the building first")
+    nf = db.scalar(select(func.count()).select_from(Floor).where(Floor.building_id == b.id))
+    if nf < b.floors: raise HTTPException(400, f"Describe every floor first: {nf} of {b.floors} floors entered")
     b.status = "submitted"; ids = holders(db, "building.review", b)
     for i in ids: notify(db, i, f"New application waiting: {b.name}")
     log(db, u, "building_submitted", f"building:{b.id}", f"{len(ids)} reviewer account(s) notified"); db.commit()
@@ -336,9 +401,13 @@ def review(bid: int, d: Review, u: User = Depends(me), db: Session = Depends(get
 @app.post(A + "/buildings/{bid}/units")
 def add_unit(bid: int, d: NewU, u: User = Depends(me), db: Session = Depends(get_db)):
     need(u, "owner"); b = get_b(db, u, bid, write=True)
-    if b.status != "approved": raise HTTPException(400, "Units can be added after the building is approved")
+    if b.status not in ("draft", "correction_requested", "approved"): raise HTTPException(400, "Shops cannot be changed while the application is under review or after it was rejected")
+    d.number = d.number.strip()
+    if not d.number: raise HTTPException(400, "Enter the shop number")
     if db.scalars(select(Unit).where(Unit.building_id == b.id, Unit.number == d.number)).first(): raise HTTPException(409, "Unit number already exists in this building")
-    n = Unit(building_id=b.id, **d.model_dump()); db.add(n); db.flush(); db.add(Measure(unit_id=n.id, m2=d.m2, by_id=u.id))
+    fl = floor_for(db, b, d.floor_id, d.floor); floor_room(db, fl, d.m2)
+    n = Unit(building_id=b.id, floor=fl.label, floor_id=fl.id, number=d.number, m2=d.m2, use=d.use, shop_name=(d.shop_name or "").strip() or None, notes=(d.notes or "").strip() or None)
+    db.add(n); db.flush(); db.add(Measure(unit_id=n.id, m2=d.m2, by_id=u.id))
     log(db, u, "unit_created", f"unit:{n.id}", str(d.m2)); db.commit(); return row(n)
 @app.get(A + "/buildings/{bid}/units")
 def units(bid: int, u: User = Depends(me), db: Session = Depends(get_db)):
@@ -347,7 +416,9 @@ def units(bid: int, u: User = Depends(me), db: Session = Depends(get_db)):
 def set_area(uid: int, d: Area, u: User = Depends(me), db: Session = Depends(get_db)):
     need(u, "owner"); un = db.get(Unit, uid)
     if not un: raise HTTPException(404, "Not found")
-    get_b(db, u, un.building_id, write=True); un.m2 = d.m2; db.add(Measure(unit_id=un.id, m2=d.m2, by_id=u.id))
+    get_b(db, u, un.building_id, write=True)
+    if un.floor_id: floor_room(db, db.get(Floor, un.floor_id), d.m2, ignore_unit=un.id)
+    un.m2 = d.m2; db.add(Measure(unit_id=un.id, m2=d.m2, by_id=u.id))
     log(db, u, "area_updated", f"unit:{un.id}", str(d.m2)); db.commit(); return row(un)
 
 @app.post(A + "/contracts")
@@ -355,13 +426,16 @@ def new_c(d: NewC, u: User = Depends(me), db: Session = Depends(get_db)):
     need(u, "owner"); un = db.get(Unit, d.unit_id)
     if not un: raise HTTPException(404, "Unit not found")
     b = get_b(db, u, un.building_id, write=True)
+    if b.status != "approved": raise HTTPException(400, "Rental contracts can be added after the building is approved")
     if d.end_date < d.start_date: raise HTTPException(400, "End date must not be before the start date")
     f = (d.fayda or "").replace(" ", "")
     if f and not (f.isdigit() and 6 <= len(f) <= 20): raise HTTPException(400, "Fayda number must be digits only")
     with LOCK:
         x = clash(db, un.id, d.start_date, d.end_date)
         if x: raise HTTPException(409, f"Unit is already rented {x.start_date} to {x.end_date} ({x.ref}). Overlapping contracts are not allowed")
-        c = Contract(unit_id=un.id, tenant_name=d.tenant_name, fayda_last4=f[-4:] or None, start_date=d.start_date, end_date=d.end_date,
+        c = Contract(unit_id=un.id, tenant_name=d.tenant_name.strip(), fayda_last4=f[-4:] or None,
+                     tenant_phone=(d.tenant_phone or "").strip() or None, tenant_tin=(d.tenant_tin or "").strip() or None,
+                     trade_license_no=(d.trade_license_no or "").strip() or None, business_activity=(d.business_activity or "").strip() or None, start_date=d.start_date, end_date=d.end_date,
                      rent=d.rent, created_by=u.id, tok=secrets.token_hex(12)); db.add(c); db.flush()
         c.ref = f"RC-{now().year}-{c.id:05d}"; log(db, u, "contract_submitted", f"contract:{c.id}")
         for i in holders(db, "contract.approve", b): notify(db, i, f"New rental contract waiting: {c.ref}")
@@ -416,6 +490,6 @@ def qr_page(tok: str, db: Session = Depends(get_db)):
     body = "".join(f"<p><b>{html.escape(k)}</b>: {html.escape(str(v))}</p>" for k, v in r.items()) if r else "<p>No matching record.</p>"
     return f"<meta name=viewport content='width=device-width,initial-scale=1'><body style='font:16px system-ui;max-width:520px;margin:24px auto;padding:0 14px'><h2 style='color:{col}'>{'Record verified' if r else 'Not found'}</h2>{body}<p style='color:#666;font-size:13px'>Public view. Names, ID numbers and rent are not shown.</p>"
 
-from . import extra, orgs  # noqa: E402  (register the extra tables and routes)
-app.include_router(extra.r); app.include_router(orgs.r)
+from . import extra, orgs, structure  # noqa: E402  (register the extra tables and routes)
+app.include_router(extra.r); app.include_router(orgs.r); app.include_router(structure.r)
 app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")

@@ -132,7 +132,7 @@ def notes(u: User = Depends(me), db: Session = Depends(get_db)):
 def safe(v):  # stop spreadsheet formula injection
     s = str(v if v is not None else ""); return "'" + s if s[:1] in "=+-@" else s
 def tb(u, db):
-    return ["BRN", "name", "woreda", "kebele", "floors", "status", "total_m2"], [[b["brn"], b["name"], b["woreda"], b["kebele"], b["floors"], b["status"], b["total_m2"]] for b in list_b(u=u, db=db)]
+    return ["BRN", "name", "sub-city", "woreda", "kebele", "floors", "status", "total_m2"], [[b["brn"], b["name"], b.get("subcity"), b["woreda"], b["kebele"], b["floors"], b["status"], b["total_m2"]] for b in list_b(u=u, db=db)]
 def tc(u, db):  # no Fayda data in exports
     return ["ref", "BRN", "unit", "m2", "tenant", "start", "end", "rent", "status"], [[c["ref"], c["brn"], c["unit"], c["m2"], c["tenant_name"], c["start_date"], c["end_date"], c["rent"], c["status"]] for c in list_c(u=u, db=db)]
 def send(name, head, rows, u, db):
