@@ -31,8 +31,9 @@ def owner(c, email):
 
 
 def submitted(c, o, name, woreda, kebele):
-    b = c.post(P + "buildings", headers=o, json={"name": name, "woreda": woreda, "kebele": kebele, "lat": 9.0, "lng": 38.7, "floors": 1}).json()
+    b = c.post(P + "buildings", headers=o, json={"subcity": "Sub", "name": name, "woreda": woreda, "kebele": kebele, "lat": 9.0, "lng": 38.7, "floors": 1}).json()
     assert c.post(P + f"buildings/{b['id']}/files", headers=o, files={"file": ("a.png", b"x" * 10)}, data={"category": "front"}).status_code == 200
+    assert c.post(P + f"buildings/{b['id']}/floors", headers=o, json={"label": "G"}).status_code == 200
     r = c.post(P + f"buildings/{b['id']}/submit", headers=o)
     assert r.status_code == 200, r.text
     return b, r.json()
@@ -55,10 +56,11 @@ def test_woreda_office_approves_only_in_its_own_woreda():
         o = owner(c, "owner-o1@x.org")
         meta = c.get(P + "org-meta", headers=o).json()  # owners are offered the woredas that have an office
         assert "Bole" in meta["woredas"] and "building.review" in meta["powers"] and meta["kinds"]["woreda"]["label"] == "Woreda office"
-        b = c.post(P + "buildings", headers=o, json={"name": "Orgs Plaza", "woreda": "Bole", "kebele": "K1", "lat": 9.0, "lng": 38.7, "floors": 1}).json()
+        b = c.post(P + "buildings", headers=o, json={"subcity": "Sub", "name": "Orgs Plaza", "woreda": "Bole", "kebele": "K1", "lat": 9.0, "lng": 38.7, "floors": 1}).json()
         up = lambda cat: c.post(P + f"buildings/{b['id']}/files", headers=o, files={"file": ("a.png", b"x" * 10)}, data={"category": cat}).status_code
         assert up("<img src=x onerror=alert(1)>") == 400  # the category is shown to officers, so only the known ones are accepted
         assert up("front") == 200
+        assert c.post(P + f"buildings/{b['id']}/floors", headers=o, json={"label": "G"}).status_code == 200
         sub = c.post(P + f"buildings/{b['id']}/submit", headers=o).json()
         assert sub["reviewers"] == 1  # one account can approve it, and it was told
         assert any("New application waiting" in n["text"] for n in c.get(P + "notifications", headers=bo).json())
@@ -127,7 +129,7 @@ def test_powers_limit_what_an_office_can_do():
         assert c.get(P + "tax/reports", headers=trade).status_code == 403 and c.get(P + "admin/audit", headers=trade).status_code == 403
 
         assert c.get(P + "admin/orgs", headers=o).status_code == 403  # owners and offices cannot manage organizations
-        assert c.post(P + "admin/orgs", headers=k1, json={"name": "Sneaky", "kind": "other"}).status_code == 403
+        assert c.post(P + "admin/orgs", headers=k1, json={"subcity": "Sub", "name": "Sneaky", "kind": "other"}).status_code == 403
 
 
 def test_admin_can_change_powers_and_switch_an_organization_off():

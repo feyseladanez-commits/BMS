@@ -12,10 +12,12 @@ def test_flow():
         assert c.post("/api/v1/auth/register", json={"email": "own@x.org", "name": "Own", "password": "ownerpass1"}).status_code == 200
         assert c.post("/api/v1/auth/login", json={"email": "own@x.org", "password": "bad"}).status_code == 401
         o = tok(c, "own@x.org", "ownerpass1"); P = "/api/v1/"
-        b = c.post(P + "buildings", headers=o, json={"name": "Plaza", "woreda": "W3", "kebele": "K1", "lat": 9.0, "lng": 38.7, "floors": 3}).json()
-        assert c.post(P + "buildings", headers=o, json={"name": "X", "woreda": "W3", "kebele": "K1", "lat": 90, "lng": 38.7, "floors": 3}).status_code == 422
+        b = c.post(P + "buildings", headers=o, json={"subcity": "Sub", "name": "Plaza", "woreda": "W3", "kebele": "K1", "lat": 9.0, "lng": 38.7, "floors": 3}).json()
+        assert c.post(P + "buildings", headers=o, json={"subcity": "Sub", "name": "X", "woreda": "W3", "kebele": "K1", "lat": 90, "lng": 38.7, "floors": 3}).status_code == 422
         assert c.post(P + f"buildings/{b['id']}/submit", headers=o).status_code == 400  # no photo yet
         assert c.post(P + f"buildings/{b['id']}/files", headers=o, files={"file": ("a.png", b"x" * 10)}, data={"category": "front"}).status_code == 200
+        assert c.post(P + f"buildings/{b['id']}/submit", headers=o).status_code == 400  # floors not described yet
+        for lab in ("G", "1", "2"): assert c.post(P + f"buildings/{b['id']}/floors", headers=o, json={"label": lab}).status_code == 200
         assert c.post(P + f"buildings/{b['id']}/submit", headers=o).status_code == 200
         assert c.post(P + f"buildings/{b['id']}/review", headers=tok(c, "o2@x.org", "officerpw1"), json={"decision": "approve"}).status_code == 404  # other woreda
         r = c.post(P + f"buildings/{b['id']}/review", headers=tok(c, "o1@x.org", "officerpw1"), json={"decision": "approve"}).json()
