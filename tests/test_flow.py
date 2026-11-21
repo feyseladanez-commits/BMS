@@ -16,6 +16,9 @@ def test_flow():
         assert c.post(P + "buildings", headers=o, json={"subcity": "Sub", "name": "X", "woreda": "W3", "kebele": "K1", "lat": 90, "lng": 38.7, "floors": 3}).status_code == 422
         assert c.post(P + f"buildings/{b['id']}/submit", headers=o).status_code == 400  # no photo yet
         assert c.post(P + f"buildings/{b['id']}/files", headers=o, files={"file": ("a.png", b"x" * 10)}, data={"category": "front"}).status_code == 200
+        c.post(P + f"buildings/{b['id']}/files", headers=o, files={"file": ("a.png", b"x" * 10)}, data={"category": "owner_fayda"}).status_code
+        c.post(P + f"buildings/{b['id']}/files", headers=o, files={"file": ("a.png", b"x" * 10)}, data={"category": "owner_photo"}).status_code
+        c.post(P + f"buildings/{b['id']}/files", headers=o, files={"file": ("a.png", b"x" * 10)}, data={"category": "title_deed"}).status_code
         assert c.post(P + f"buildings/{b['id']}/submit", headers=o).status_code == 400  # floors not described yet
         for lab in ("G", "1", "2"): assert c.post(P + f"buildings/{b['id']}/floors", headers=o, json={"label": lab}).status_code == 200
         assert c.post(P + f"buildings/{b['id']}/submit", headers=o).status_code == 200

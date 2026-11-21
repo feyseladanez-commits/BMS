@@ -27,8 +27,12 @@ def test_structure_photos_and_tenant_documents():
         un = s1.json()["id"]
         ph = lambda name, data: c.post(P + f"units/{un}/photos", headers=o, files={"file": (name, data)})
         assert ph("shop.pdf", b"x").status_code == 400 and ph("shop.jpg", b"jpgdata").status_code == 200
-        assert c.post(B + "submit", headers=o).status_code == 400  # front photo missing
+        miss = c.post(B + "submit", headers=o); assert miss.status_code == 400 and "Fayda" in miss.json()["detail"] and "Title deed" in miss.json()["detail"]
+        assert c.post(P + "buildings", headers=o, json={**mk, "name": "Bad Fayda", "subcity": "Bole", "owner_fayda": "12ab"}).status_code == 400
         c.post(B + "files", headers=o, files={"file": ("f.png", b"x" * 5)}, data={"category": "front"})
+        c.post(B + "files", headers=o, files={"file": ("f.png", b"x" * 5)}, data={"category": "owner_fayda"})
+        c.post(B + "files", headers=o, files={"file": ("f.png", b"x" * 5)}, data={"category": "owner_photo"})
+        c.post(B + "files", headers=o, files={"file": ("f.png", b"x" * 5)}, data={"category": "title_deed"})
         assert c.post(B + "submit", headers=o).status_code == 200
         # a contract needs an approved building
         k = {"unit_id": un, "tenant_name": "Abel", "start_date": "2027-01-01", "end_date": "2027-12-31", "rent": 100, "tenant_tin": "0012345678", "trade_license_no": "TL-77"}
